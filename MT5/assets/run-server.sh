@@ -1,15 +1,15 @@
 #!/bin/sh
 
-# Wait for auto-login to complete (VNC login done, MT5 connected)
-LOGIN_MARKER="/tmp/login_complete"
+export WINEPREFIX="${WINEPREFIX:-/opt/wineprefix}"
+export DISPLAY="${DISPLAY:-:0}"
 
-echo "Waiting for auto-login to complete..."
+# The MT5 Python IPC is reliable only after the terminal GUI auto-login
+# sequence has dismissed blocking dialogs and created this marker.
+LOGIN_MARKER="/tmp/login_complete"
+echo "Waiting for MT5 auto-login marker..."
 while [ ! -f "$LOGIN_MARKER" ]; do
     sleep 2
 done
-echo "Auto-login marker found."
-
-# Start the server
-echo "Starting FastAPI Server..."
+echo "MT5 auto-login marker found. Starting FastAPI Server..."
 cd $HOME/api
-wine python -m app
+exec wine python -m app

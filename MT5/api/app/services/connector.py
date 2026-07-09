@@ -29,7 +29,7 @@ class MT5Connector:
         with self._lock:
             if self._initialized:
                 return True
-            success = mt5.initialize(MT5_PATH, portable=True)
+            success = mt5.initialize(MT5_PATH, portable=True, timeout=5000)
             if not success:
                 self._last_error = mt5.last_error()
                 raise MT5ConnectionError(f"MT5 terminal is not ready: {self._last_error}")
@@ -44,6 +44,7 @@ class MT5Connector:
                 login=int(login),
                 password=password,
                 server=server,
+                timeout=30000,
                 portable=True,
             )
             if not success:
@@ -62,12 +63,12 @@ class MT5Connector:
         terminal_info = None
         account_info = None
         error = None
-        try:
-            self.initialize()
-            terminal_info = mt5.terminal_info()
-            account_info = mt5.account_info()
-        except Exception as exc:
-            error = str(exc)
+        if self._initialized:
+            try:
+                terminal_info = mt5.terminal_info()
+                account_info = mt5.account_info()
+            except Exception as exc:
+                error = str(exc)
         logged_in = bool(account_info and getattr(account_info, "login", None))
         return {
             "api_ready": True,

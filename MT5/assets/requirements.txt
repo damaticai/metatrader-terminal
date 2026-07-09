@@ -1,5 +1,5 @@
 numpy==1.21.4 #==1.19.5 # ==1.18.2
-MetaTrader5==5.0.5640
+MetaTrader5==5.0.5735
 pyparsing==2.4.7
 # mt5linux
 pandas==1.4.1

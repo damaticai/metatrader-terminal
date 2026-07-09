@@ -13,7 +13,7 @@ if [ ! -f "/opt/wineprefix/drive_c/Metatrader-5/terminal64.exe" ]; then
     wget -q $URL
     wget -q $URL_WEBVIEW
 
-    # Set environment to Windows 10
+    # Set environment to Windows 11
     winecfg -v=win11
 
     # Install WebView2
@@ -24,9 +24,7 @@ if [ ! -f "/opt/wineprefix/drive_c/Metatrader-5/terminal64.exe" ]; then
     wine mt5setup.exe /auto /path:"C:\Metatrader-5"
     wineserver -w
 
-    # Disable LiveUpdate immediately after install (before any launch)
-    # to prevent terminal from auto-updating to a build newer than
-    # the MetaTrader5 Python library (5.0.5640 on PyPI).
+    # Disable LiveUpdate immediately after install (before any launch).
     MT5_CFG_DIR="/opt/wineprefix/drive_c/Metatrader-5/Config"
     mkdir -p "$MT5_CFG_DIR"
     { printf '\xFF\xFE'; printf '[LiveUpdate]\r\nLiveUpdateMode=2\r\n' | iconv -f UTF-8 -t UTF-16LE; } > "$MT5_CFG_DIR/terminal.ini"
@@ -45,23 +43,39 @@ if [ "$BUILD_MODE" = "1" ]; then
     exit 0
 fi
 
-# Keep MT5 alive — restart it whenever it exits so the VNC auto-login
-# script has time to type credentials into the GUI. On Wine 10.0, MT5
-# exits immediately if no server is configured; the auto-login process
-# needs the terminal open to enter login details via VNC.
+export WINEPREFIX="${WINEPREFIX:-/opt/wineprefix}"
+export DISPLAY="${DISPLAY:-:0}"
+
+# Keep MT5 alive and shut Wine down cleanly when supervisor stops this script.
 LOGIN_MARKER="/tmp/login_complete"
+child_pid=""
+
+cleanup() {
+    echo "Stopping MetaTrader 5..."
+    if [ -n "$child_pid" ]; then
+        kill "$child_pid" 2>/dev/null || true
+        wait "$child_pid" 2>/dev/null || true
+    fi
+    wineserver -k 2>/dev/null || true
+    exit 0
+}
+
+trap cleanup TERM INT
 
 while true; do
     echo "Launching MetaTrader 5..."
-    wine /opt/wineprefix/drive_c/Metatrader-5/terminal64.exe /portable
+    wine /opt/wineprefix/drive_c/Metatrader-5/terminal64.exe /portable &
+    child_pid=$!
+    wait "$child_pid"
     EXIT_CODE=$?
+    child_pid=""
 
-    # If auto-login has completed and MT5 exits, it's a real crash — still restart
+    # If auto-login has completed and MT5 exits, it is a real crash; still restart.
     if [ -f "$LOGIN_MARKER" ]; then
-        echo "MT5 exited (code $EXIT_CODE) after login — restarting in 5s..."
+        echo "MT5 exited (code $EXIT_CODE) after login; restarting in 5s..."
         sleep 5
     else
-        echo "MT5 exited (code $EXIT_CODE) before login — restarting in 2s..."
+        echo "MT5 exited (code $EXIT_CODE) before login; restarting in 2s..."
         sleep 2
     fi
 done
