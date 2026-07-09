@@ -1,0 +1,27 @@
+services:
+  mt5-terminal:
+    image: ghcr.io/nodalytics/mt5-terminal:latest
+    ports:
+      - "6901:6901"
+      - "8000:8000"
+    environment:
+      VNC_USER: ${VNC_USER:-"mt5_user"}
+      VNC_PASSWORD: ${VNC_PASSWORD:-"password"}
+      MT5_LOGIN: ${MT5_LOGIN:-0}
+      MT5_API_PORT: ${MT5_API_PORT:-8000}
+      API_KEY_SEED: ${API_KEY_SEED:-"default-seed-for-dev"}
+      MT5_PASSWORD: ${MT5_PASSWORD:-"password"}
+      MT5_SERVER: ${MT5_SERVER:-"MetaTrader-Demo"}
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.8'
+          memory: 1G
+        reservations:
+          memory: 512M

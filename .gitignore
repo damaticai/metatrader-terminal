@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.trash/
+.env
+*.env
+!.env.example
+!*.env.example
+logs/
+*.db
+*.sqlite
+*.sqlite3
+*.key
+*.pem
+MT5/data/
+MT5/api/mt5_api/data/
+MT5/api/logs/

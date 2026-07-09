@@ -1,0 +1,40 @@
+# VNC Subdomain -> Port 6901 (mt5-vnc)
+server {
+    listen 80;
+    server_name mt5.yourdomain; # VNC Access
+
+    access_log /var/log/nginx/mt5_vnc_access.log;
+    error_log /var/log/nginx/mt5_vnc_error.log;
+
+    # Security Headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+    add_header Content-Security-Policy "default-src 'self' http: https: data: blob: 'unsafe-inline'" always;
+
+    location / {
+        proxy_pass http://localhost:6901;
+        include snippets/proxy_params.conf;
+    }
+}
+
+# API Subdomain -> Port 8000 (mt5-api)
+server {
+    listen 80;
+    server_name mt5-api.yourdomain; # API Access
+
+    access_log /var/log/nginx/mt5_api_access.log;
+    error_log /var/log/nginx/mt5_api_error.log;
+
+    # Security Headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+
+    location / {
+        proxy_pass http://localhost:8000;
+        include snippets/proxy_params.conf;
+    }
+}

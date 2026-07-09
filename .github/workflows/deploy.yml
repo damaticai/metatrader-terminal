@@ -1,0 +1,61 @@
+# name: Remote SSH Deploy
+
+# on:
+#   workflow_run:
+#     workflows: ["Docker Build & Test"]
+#     types:
+#       - completed
+#     branches:
+#       - main
+
+# jobs:
+#   deploy:
+#     name: Deploy to EC2
+#     runs-on: ubuntu-latest
+#     if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    
+#     steps:
+#       - name: Checkout code
+#         uses: actions/checkout@v4
+
+#       - name: Debug - List files
+#         run: ls -R
+
+#       - name: Copy deployment files via SCP
+#         uses: appleboy/scp-action@v0.1.7
+#         with:
+#           host: ${{ secrets.SSH_HOST }}
+#           username: ${{ secrets.SSH_USER }}
+#           key: ${{ secrets.SSH_KEY }}
+#           source: "MT5/docker-compose.yml,MT5/.env.example,nginx/"
+#           target: ${{ secrets.DEPLOY_PATH }}
+#           strip_components: 1
+
+#       - name: Deploy services and update server config
+#         uses: appleboy/ssh-action@v1.0.3
+#         with:
+#           host: ${{ secrets.SSH_HOST }}
+#           username: ${{ secrets.SSH_USER }}
+#           key: ${{ secrets.SSH_KEY }}
+#           script: |
+#             set -e
+            
+#             echo "Moving to deployment path..."
+#             cd ${{ secrets.DEPLOY_PATH }}
+
+#             # ── Environment files (force refresh from templates) ───────────
+#             cp .env.example .env
+#             echo "Successfully refreshed environment files from templates"
+
+#             # ── Pull and restart containers ────────────────────────────────
+#             echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+#             docker compose pull
+#             docker compose up -d
+#             docker logout ghcr.io
+
+#             # ── Cleanup ────────────────────────────────────────────────────
+#             echo "Pruning old Docker images and build cache..."
+#             docker system prune -af --volumes
+#             docker image prune -f
+#             docker builder prune -f --filter "until=48h"
+#             echo "Deploy complete."
