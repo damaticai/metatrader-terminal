@@ -1,6 +1,6 @@
 services:
   mt5-terminal:
-    image: ghcr.io/nodalytics/mt5-terminal:latest
+    image: ghcr.io/damaticai/metatrader-terminal:latest
     ports:
       - "6901:6901"
       - "8000:8000"
