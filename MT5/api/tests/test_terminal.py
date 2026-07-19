@@ -24,6 +24,14 @@ def test_terminal_info_algo_trading_enabled(client):
     assert r.json()["trade_allowed"] is True
 
 
+def test_terminal_status_reports_broker_and_trade_readiness(client):
+    r = client.get("/api/v1/terminal/status")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["broker_connected"] is True
+    assert data["trade_ready"] is True
+
+
 def test_account_info(client):
     r = client.get("/api/v1/terminal/account/info")
     assert r.status_code == 200

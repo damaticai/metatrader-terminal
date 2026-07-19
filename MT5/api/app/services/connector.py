@@ -69,14 +69,28 @@ class MT5Connector:
                 account_info = mt5.account_info()
             except Exception as exc:
                 error = str(exc)
+        terminal_ready = bool(self._initialized and terminal_info)
         logged_in = bool(account_info and getattr(account_info, "login", None))
+        broker_connected = bool(
+            terminal_info and getattr(terminal_info, "connected", False)
+        )
+        trade_allowed = bool(
+            getattr(terminal_info, "trade_allowed", False)
+        ) if terminal_info else False
         return {
             "api_ready": True,
-            "terminal_ready": bool(self._initialized and terminal_info),
+            "terminal_ready": terminal_ready,
             "logged_in": logged_in,
             "login": getattr(account_info, "login", None) if logged_in else None,
             "server": getattr(account_info, "server", None) if logged_in else None,
-            "trade_allowed": bool(getattr(terminal_info, "trade_allowed", False)) if terminal_info else False,
+            "trade_allowed": trade_allowed,
+            "broker_connected": broker_connected,
+            "trade_ready": bool(
+                terminal_ready
+                and logged_in
+                and broker_connected
+                and trade_allowed
+            ),
             "last_error": error or self._last_error,
         }
 
