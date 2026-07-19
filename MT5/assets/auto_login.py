@@ -249,7 +249,14 @@ class VNClient:
         )
 
         if is_connected:
-            print(f"Login successful: {is_connected}")
+            account = mt5.account_info()
+            actual_login = int(getattr(account, "login", 0) or 0) if account else 0
+            if actual_login != int(login):
+                raise Exception(
+                    "MT5 IPC connected, but login verification failed: "
+                    f"expected account {login}, actual account {actual_login or 'unknown'}"
+                )
+            print(f"Login successful and verified for account {actual_login}")
             self._set_login_successful_env_var()
             return True
         else:
@@ -260,7 +267,12 @@ class VNClient:
                 raise Exception(f"Login failed, error code = {error_code}, description = {error_description}")
 
             if max_retries <= 0:
-                raise Exception(f"Login verification timed out after retries, error code = {error_code}, description = {error_description}")
+                raise Exception(
+                    "MT5 IPC timeout (-10005) after retries. Verify that this "
+                    "container uses the pinned MT5 build 5836 image and that "
+                    "terminal64.exe is responsive. "
+                    f"description = {error_description}"
+                )
 
             # Dismiss popups and retry
             self.dismiss_popups()
@@ -322,10 +334,10 @@ def main():
         # must be dismissed before the API server can connect.
         vnc_mt5_client.dismiss_liveupdate()
 
-        # Create marker file so the API server knows VNC login is done.
-        # The server will call mt5.initialize() in a background thread.
-        with open('/tmp/login_complete', 'w') as f:
-            f.write('1')
+        # Only publish the marker after the Python API has proved that the
+        # terminal IPC channel and requested account login both work.
+        if not vnc_mt5_client.verify_login(login, password, server):
+            raise RuntimeError("MT5 login verification did not complete")
 
         print("Auto-login sequence completed.")
     except Exception as e:

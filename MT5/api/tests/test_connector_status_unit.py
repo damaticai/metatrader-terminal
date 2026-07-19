@@ -1,9 +1,12 @@
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 sys.modules.setdefault("MetaTrader5", SimpleNamespace())
 
 from app.services import connector as connector_module
+from app.utils.exceptions import MT5ConnectionError
 
 
 def _connector_with(terminal_info, account_info):
@@ -41,3 +44,42 @@ def test_status_is_trade_ready_only_when_all_conditions_are_true():
 
     assert status["broker_connected"] is True
     assert status["trade_ready"] is True
+
+
+def test_initialize_explains_ipc_timeout(monkeypatch):
+    monkeypatch.setattr(
+        connector_module,
+        "mt5",
+        SimpleNamespace(
+            initialize=lambda *_args, **_kwargs: False,
+            last_error=lambda: (-10005, "IPC timeout"),
+        ),
+    )
+    connector = connector_module.MT5Connector()
+
+    with pytest.raises(MT5ConnectionError) as caught:
+        connector.initialize()
+
+    message = str(caught.value)
+    assert "IPC timeout (-10005)" in message
+    assert "pinned MT5 build 5836" in message
+    assert "recreate the container" in message
+
+
+def test_status_actively_reports_ipc_timeout(monkeypatch):
+    monkeypatch.setattr(
+        connector_module,
+        "mt5",
+        SimpleNamespace(
+            initialize=lambda *_args, **_kwargs: False,
+            last_error=lambda: (-10005, "IPC timeout"),
+        ),
+    )
+    connector = connector_module.MT5Connector()
+
+    status = connector.status()
+
+    assert status["api_ready"] is True
+    assert status["terminal_ready"] is False
+    assert status["trade_ready"] is False
+    assert "IPC timeout (-10005)" in status["last_error"]

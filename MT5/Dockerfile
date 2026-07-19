@@ -5,12 +5,19 @@ RUN go mod init build && \
     go get github.com/geek1011/easy-novnc@v1.1.0 && \
     go build -o /bin/easy-novnc github.com/geek1011/easy-novnc
 
+# Immutable, known-good MT5 build 5836.  Do not replace this with the moving
+# download.mql5.com installer: that URL currently installs build 6034, whose
+# terminal64.exe times out when the Linux Wine Python API opens MT5 IPC.
+FROM ghcr.io/damaticai/metatrader-terminal@sha256:4a10bcc649bd448425ec31fd8c80baf5f4c02d7d7ff0e1267c78c79a2b261f9e AS mt5-build-5836
+
 # Final stage
 FROM docker.io/tobix/pywine:3.9
 
 # ----------------------------------------------------------------------------------------------
 LABEL org.opencontainers.image.source=https://github.com/damaticai/metatrader-terminal
 LABEL org.opencontainers.image.description="Custom MetaTrader 5 Terminal API"
+LABEL org.opencontainers.image.mt5-build="5836"
+LABEL org.opencontainers.image.mt5-terminal-sha256="e87e8b77fa415fc91e9acbe692826e76b7907fb53db4244aed36618f9af30b9e"
 # ----------------------------------------------------------------------------------------------
 
 # Environment Configurations
@@ -65,9 +72,13 @@ COPY assets/menu.xml /etc/xdg/openbox/
 
 WORKDIR ${HOME}
 
-# Layer 1: Install MT5 terminal under Wine 7.0
-COPY assets/run-mt5.sh /tmp/run-mt5.sh
-RUN chmod +x /tmp/run-mt5.sh && BUILD_MODE=1 xvfb-run /tmp/run-mt5.sh
+# Layer 1: Restore the complete, known-good Wine prefix containing MT5 build
+# 5836, then fail the image build if terminal64.exe ever differs.
+COPY --from=mt5-build-5836 /opt/wineprefix /opt/wineprefix
+ARG MT5_TERMINAL_SHA256=e87e8b77fa415fc91e9acbe692826e76b7907fb53db4244aed36618f9af30b9e
+RUN actual_sha256="$(sha256sum /opt/wineprefix/drive_c/Metatrader-5/terminal64.exe | awk '{print $1}')" && \
+    test "${actual_sha256}" = "${MT5_TERMINAL_SHA256}" && \
+    echo "Pinned terminal64.exe SHA256=${actual_sha256} (MT5 build 5836)"
 
 # Layer 2: Upgrade Wine 7.0 to 10.0 (MT5 build 5727+ needs Wine 10.0 for IPC)
 # The base image has the WineHQ repo pre-configured.

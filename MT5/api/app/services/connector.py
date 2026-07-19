@@ -8,6 +8,24 @@ from app.utils.exceptions import MT5ConnectionError
 logger = logging.getLogger(__name__)
 
 MT5_PATH = "C:\\Metatrader-5\\terminal64.exe"
+MT5_BUILD = 5836
+MT5_IPC_TIMEOUT = -10005
+
+
+def _mt5_error_message(action: str, error) -> str:
+    try:
+        code = int(error[0])
+    except (IndexError, TypeError, ValueError):
+        code = None
+    if code == MT5_IPC_TIMEOUT:
+        return (
+            f"{action}: MT5 IPC timeout (-10005). The Python API could not "
+            f"communicate with terminal64.exe. This image requires the pinned "
+            f"MT5 build {MT5_BUILD}; recreate the container from the latest "
+            f"published image and check the terminal process if the error persists. "
+            f"raw_error={error}"
+        )
+    return f"{action}: {error}"
 
 
 class MT5Connector:
@@ -32,7 +50,9 @@ class MT5Connector:
             success = mt5.initialize(MT5_PATH, portable=True, timeout=5000)
             if not success:
                 self._last_error = mt5.last_error()
-                raise MT5ConnectionError(f"MT5 terminal is not ready: {self._last_error}")
+                raise MT5ConnectionError(
+                    _mt5_error_message("MT5 terminal is not ready", self._last_error)
+                )
             self._initialized = True
             self._last_error = None
             return True
@@ -50,11 +70,18 @@ class MT5Connector:
             if not success:
                 self._initialized = False
                 self._last_error = mt5.last_error()
-                raise MT5ConnectionError(f"MT5 login failed: {self._last_error}")
+                raise MT5ConnectionError(
+                    _mt5_error_message("MT5 login failed", self._last_error)
+                )
             account = mt5.account_info()
             if account is None or int(getattr(account, "login", 0) or 0) != int(login):
                 self._last_error = mt5.last_error()
-                raise MT5ConnectionError(f"MT5 login verification failed: {self._last_error}")
+                raise MT5ConnectionError(
+                    _mt5_error_message(
+                        "MT5 login verification failed",
+                        self._last_error,
+                    )
+                )
             self._initialized = True
             self._last_error = None
             return account
@@ -63,6 +90,10 @@ class MT5Connector:
         terminal_info = None
         account_info = None
         error = None
+        try:
+            self.initialize()
+        except MT5ConnectionError as exc:
+            error = str(exc)
         if self._initialized:
             try:
                 terminal_info = mt5.terminal_info()
