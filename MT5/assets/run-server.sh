@@ -10,6 +10,6 @@ echo "Waiting for MT5 auto-login marker..."
 while [ ! -f "$LOGIN_MARKER" ]; do
     sleep 2
 done
-echo "MT5 auto-login marker found. Starting FastAPI Server..."
+echo "MT5 auto-login marker found. Starting local Socket service..."
 cd $HOME/api
 exec wine python -m app

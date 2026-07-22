@@ -15,7 +15,7 @@ FROM docker.io/tobix/pywine:3.9
 
 # ----------------------------------------------------------------------------------------------
 LABEL org.opencontainers.image.source=https://github.com/damaticai/metatrader-terminal
-LABEL org.opencontainers.image.description="Custom MetaTrader 5 Terminal API"
+LABEL org.opencontainers.image.description="MetaTrader 5 loopback Raw TCP Socket service"
 LABEL org.opencontainers.image.mt5-build="5836"
 LABEL org.opencontainers.image.mt5-terminal-sha256="e87e8b77fa415fc91e9acbe692826e76b7907fb53db4244aed36618f9af30b9e"
 # ----------------------------------------------------------------------------------------------
@@ -23,8 +23,8 @@ LABEL org.opencontainers.image.mt5-terminal-sha256="e87e8b77fa415fc91e9acbe69282
 # Environment Configurations
 ENV HOME=/root \
     DISPLAY=:0 \
-    SERVER_HOST=0.0.0.0 \
-    SERVER_PORT=18812 \
+    MT5_SOCKET_HOST=127.0.0.1 \
+    MT5_SOCKET_PORT=18812 \
     VNC_DESKTOP_NAME="MetaTrader 5" \
     VNC_GEOMETRY=1280x800 \
     DRIVE_C=${WINEPREFIX}/drive_c \
@@ -107,6 +107,9 @@ RUN mkdir -p ${HOME}/Desktop && \
     chmod +x run-server.sh xtigervnc.sh easy-novnc.sh run-mt5.sh vnc-auth.sh entrypoint.sh auto_login_wrapper.sh
 
 # EXPOSE 5900
-EXPOSE 6901 8000
+EXPOSE 6901 18812
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=90s --retries=12 \
+    CMD wine python -c "import json,socket,struct; p=json.dumps({'id':'health','operation':'health','payload':{}}).encode(); s=socket.create_connection(('127.0.0.1',18812),3); s.sendall(struct.pack('>I',len(p))+p); f=s.makefile('rb'); n=struct.unpack('>I',f.read(4))[0]; r=json.loads(f.read(n)); s.close(); raise SystemExit(0 if r.get('ok') else 1)" || exit 1
 
 CMD ["/root/entrypoint.sh"]

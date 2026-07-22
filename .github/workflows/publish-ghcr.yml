@@ -5,6 +5,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to publish
+        required: true
+        default: socket-v1
+        type: string
 
 permissions:
   contents: read
@@ -37,7 +43,7 @@ jobs:
           file: ./MT5/Dockerfile
           push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.event_name == 'workflow_dispatch' && inputs.tag || 'latest' }}
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/damaticai/metatrader-terminal

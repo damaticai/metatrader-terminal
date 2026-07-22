@@ -31,7 +31,7 @@ MT5_PASSWORD=your_password
 MT5_SERVER=YourBroker-Demo
 ```
 
-When all three are set, the container will automatically log in to your MT5 account on startup via VNC automation and verify the connection before starting the API.
+When all three are set, the container automatically logs in through VNC automation and verifies the terminal before starting the loopback Socket service.
 
 ## 3. Deployment
 
@@ -47,17 +47,17 @@ docker compose -f MT5/docker-compose.yml --env-file .env up -d
 docker run -d \
   --name mt5-terminal \
   -p 6901:6901 \
-  -p 8000:8000 \
+  -p 127.0.0.1:18812:18812 \
   -e MT5_LOGIN=12345678 \
   -e MT5_PASSWORD=your_password \
   -e MT5_SERVER=YourBroker-Demo \
   -e VNC_PASSWORD=password \
-  ghcr.io/nodalytics/mt5-terminal:latest
+  ghcr.io/damaticai/metatrader-terminal:socket-v1
 ```
 
-This will start the MT5 terminal (VNC), auto-login to your account, and launch the FastAPI server.
+This starts the MT5 terminal (VNC), performs auto-login, and launches the framed Raw TCP service for the host Agent. Port `18812` must remain bound to loopback.
 
-> **Note**: The full startup takes approximately **2 minutes**. Most of this time is the MT5 terminal connecting to your broker's server. The API will not be available until login is verified. You can monitor progress via the VNC interface at `http://localhost:6901`.
+> **Note**: The full startup takes approximately **2 minutes**. Most of this time is the MT5 terminal connecting to your broker's server. Socket health will not be ready until login is verified. You can monitor progress via the VNC interface at `http://localhost:6901`.
 
 ## 4. Build Architecture
 
@@ -69,7 +69,7 @@ If building the image from source, the Dockerfile uses cached layers ordered by 
 | MT5 install | Downloads and installs MT5 under Wine 7.0 | `run-mt5.sh` changes |
 | Wine upgrade | Upgrades Wine 7.0 → 10.0 for IPC compatibility | `wine_fix.sh` changes |
 | Python deps | `pip install` under Wine 10.0 | `requirements.txt` changes |
-| App code | Copies auto-login, API, configs | **Any code change (instant)** |
+| App code | Copies auto-login, Socket service, configs | **Any code change (instant)** |
 
 MT5 is installed under Wine 7.0 (fast), then Wine is upgraded to 10.0. Python packages are installed after the upgrade so they run under the correct Wine version. This keeps install times down while ensuring runtime IPC compatibility with MT5 build 5727+.
 

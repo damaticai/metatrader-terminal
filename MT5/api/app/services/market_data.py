@@ -61,11 +61,6 @@ class MarketDataService:
             raise MT5SymbolNotFoundError(f"Failed to select symbol {symbol}")
 
     def get_symbol_info_tick(self, symbol: str) -> Dict:
-        cache_key = f"symbol_tick_{symbol}"
-        cached_tick = cache_manager.get(cache_key)
-        if cached_tick:
-            return cached_tick
-
         mt5_connector.initialize()
         self.ensure_symbol_selected(symbol)
         tick = mt5.symbol_info_tick(symbol)
@@ -73,7 +68,6 @@ class MarketDataService:
             raise MT5SymbolNotFoundError(f"Tick data for '{symbol}' not found.")
 
         tick_dict = normalize_mt5_time_fields(tick._asdict(), symbol)
-        cache_manager.set(cache_key, tick_dict, ttl=1)  # Tick data changes frequently
         return tick_dict
 
     def copy_rates_from_pos(self, symbol: str, timeframe: str, start_pos: int, count: int) -> Optional[List[Dict]]:
