@@ -55,6 +55,11 @@ Supported operations:
 - `trade.close_all`
 - `history.deals`
 - `history.orders`
+- `network.public_ip` (fixed HTTPS provider allowlist; empty payload only)
+
+Protocol version `1.1` advertises its version and operation list in the
+`health` response. Consumers must fail closed if either the version or a
+required capability is missing.
 
 ## Running
 
@@ -76,4 +81,5 @@ pytest -q
 ```
 
 The tests cover framing, split/coalesced packets, invalid JSON, oversized
-frames, serialized IPC dispatch, connector health, and the pinned MT5 image.
+frames, serialized IPC dispatch, connector health, fixed-provider public-IP
+validation/fallbacks, and the pinned MT5 image.
