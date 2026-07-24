@@ -19,7 +19,9 @@ from app.socket_server import (
     MT5SocketDispatcher,
     MT5SocketServer,
     json_value,
+    socket_error_payload,
 )
+from app.utils.exceptions import MT5OrderError
 
 
 async def read_response(reader):
@@ -98,6 +100,25 @@ def test_socket_server_returns_structured_error_for_invalid_json():
         await listener.wait_closed()
 
     asyncio.run(scenario())
+
+
+def test_socket_error_payload_preserves_mt5_retcode_and_diagnostics():
+    error = MT5OrderError(
+        "Order failed: No money",
+        code=10019,
+        detail="broker retcode=10019 raw comment=No money",
+    )
+
+    payload = socket_error_payload(error)
+
+    assert payload == {
+        "error_code": "10019",
+        "code": "10019",
+        "exception_type": "MT5OrderError",
+        "message": "Order failed: No money",
+        "raw_message": "Order failed: No money",
+        "diagnostic_detail": "broker retcode=10019 raw comment=No money",
+    }
 
 
 def test_dispatcher_serializes_all_mt5_ipc_calls():
@@ -298,14 +319,15 @@ def test_public_ip_all_failures_return_stable_structured_error(monkeypatch):
         return response
 
     response = asyncio.run(scenario())
-    assert response == {
-        "id": "public-ip-failure",
-        "ok": False,
-        "error": {
-            "code": "PublicIPLookupError",
-            "message": "public IP lookup failed for all configured providers",
-        },
-    }
+    assert response["id"] == "public-ip-failure"
+    assert response["ok"] is False
+    assert response["error"]["code"] == "PublicIPLookupError"
+    assert response["error"]["error_code"] == "PublicIPLookupError"
+    assert response["error"]["exception_type"] == "PublicIPLookupError"
+    assert (
+        response["error"]["message"]
+        == "public IP lookup failed for all configured providers"
+    )
 
 
 def test_history_deals_is_bounded_sorted_and_cursor_driven(monkeypatch):

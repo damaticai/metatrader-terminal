@@ -57,7 +57,7 @@ Supported operations:
 - `history.orders`
 - `network.public_ip` (fixed HTTPS provider allowlist; empty payload only)
 
-Protocol version `1.1` advertises its version and operation list in the
+Protocol version `1.2` advertises its version and operation list in the
 `health` response. Consumers must fail closed if either the version or a
 required capability is missing.
 

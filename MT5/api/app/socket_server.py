@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 MAX_FRAME_BYTES = 1024 * 1024
 HEADER = struct.Struct(">I")
-SOCKET_PROTOCOL_VERSION = "1.1"
+SOCKET_PROTOCOL_VERSION = "1.2"
 PUBLIC_IP_PROVIDERS = (
     ("https://api.ipify.org", "ipify"),
     ("https://checkip.amazonaws.com", "aws-checkip"),
@@ -90,6 +90,27 @@ def json_value(value: Any) -> Any:
     if isinstance(value, (list, tuple, set)):
         return [json_value(item) for item in value]
     return str(value)
+
+
+def socket_error_payload(exc: Exception) -> dict[str, str]:
+    exception_type = type(exc).__name__
+    raw_message = str(exc)
+    code = getattr(exc, "code", None)
+    if code in (None, ""):
+        stable_codes = {
+            "ValueError": "INVALID_ARGUMENT",
+            "KeyError": "INVALID_ARGUMENT",
+        }
+        code = stable_codes.get(exception_type, exception_type)
+    detail = str(getattr(exc, "detail", "") or raw_message)
+    return {
+        "error_code": str(code),
+        "code": str(code),
+        "exception_type": exception_type,
+        "message": raw_message,
+        "raw_message": raw_message,
+        "diagnostic_detail": detail,
+    }
 
 
 class MT5SocketDispatcher:
@@ -427,7 +448,11 @@ class MT5SocketServer:
                     response = {"id": request_id, "ok": True, "result": result}
                 except Exception as exc:
                     logger.exception("MT5 Socket request failed")
-                    response = {"id": request_id, "ok": False, "error": {"code": type(exc).__name__, "message": str(exc)}}
+                    response = {
+                        "id": request_id,
+                        "ok": False,
+                        "error": socket_error_payload(exc),
+                    }
                 await self._write(writer, response)
         finally:
             writer.close()

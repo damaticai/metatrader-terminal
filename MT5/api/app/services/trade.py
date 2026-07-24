@@ -4,12 +4,75 @@ from typing import Optional, List, Dict, Any
 import MetaTrader5 as mt5
 from .connector import mt5_connector
 from .market_data import market_data_service
-from app.utils.exceptions import MT5OrderError, MT5SymbolNotFoundError
+from app.utils.exceptions import MT5BaseException, MT5OrderError, MT5SymbolNotFoundError
 from app.utils.time_sync import broker_datetime_from_utc, normalize_mt5_records
 
 logger = logging.getLogger(__name__)
 
 class TradeService:
+    @staticmethod
+    def _retcode(result) -> int:
+        try:
+            return int(getattr(result, "retcode", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _accepted_retcodes() -> set:
+        return {
+            int(getattr(mt5, "TRADE_RETCODE_PLACED", 10008)),
+            int(getattr(mt5, "TRADE_RETCODE_DONE", 10009)),
+            int(getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010)),
+        }
+
+    @staticmethod
+    def _empty_order_error(action: str) -> MT5OrderError:
+        try:
+            last_error = mt5.last_error()
+        except Exception:
+            last_error = None
+        try:
+            last_code = int(last_error[0])
+        except (IndexError, TypeError, ValueError):
+            last_code = None
+        detail = f"{action}: empty response; last_error={last_error!r}"
+        lowered = detail.casefold()
+        if last_code == -2 and "comment" in lowered:
+            code = -2
+        elif "invalid comment" in lowered:
+            code = -2
+        elif "invalid argument" in lowered or "invalid parameter" in lowered:
+            code = 10013
+        elif last_code and 10004 <= last_code <= 10046:
+            code = last_code
+        else:
+            code = "EMPTY_RESPONSE"
+        return MT5OrderError(
+            f"{action}: empty response",
+            code=code,
+            detail=detail,
+        )
+
+    def _decorate_order_result(
+        self,
+        result,
+        *,
+        requested_volume: float,
+    ) -> Dict[str, Any]:
+        value = self._result_to_dict(result)
+        retcode = self._retcode(result)
+        if retcode == int(getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010)):
+            actual_volume = float(
+                value.get("volume")
+                or getattr(result, "volume", 0)
+                or 0
+            )
+            value["partial_fill"] = True
+            value["requested_volume"] = float(requested_volume)
+            value["actual_volume"] = actual_volume
+            value["warning"] = "订单部分成交，请检查实际成交手数"
+        return value
+
     def _result_to_dict(self, result) -> Dict:
         if result is None:
             return {}
@@ -121,12 +184,19 @@ class TradeService:
         before_positions = self._positions_for_order(order["symbol"], int(order.get("magic") or 0))
         before_tickets = {self._position_ticket(pos) for pos in before_positions}
         result = self.send_market_order(**order)
-        order_result = self._result_to_dict(result)
+        order_result = self._decorate_order_result(
+            result,
+            requested_volume=float(order["volume"]),
+        )
+        matched_volume = float(
+            order_result.get("actual_volume")
+            or order["volume"]
+        )
         positions_after = self._positions_for_order(order["symbol"], int(order.get("magic") or 0))
         position = self._best_open_position(
             positions_after,
             order["symbol"],
-            float(order["volume"]),
+            matched_volume,
             str(order["order_type"]),
             int(order.get("magic") or 0),
             before_tickets,
@@ -137,7 +207,7 @@ class TradeService:
             order_result["price_open"] = position.get("price_open")
             order_result["time"] = position.get("time")
             order_result["time_msc"] = position.get("time_msc")
-        return {
+        response = {
             "success": True,
             "request": dict(order),
             "result": order_result,
@@ -149,22 +219,54 @@ class TradeService:
                 "ticket": str(position.get("ticket")) if position else "",
                 "symbol": order.get("symbol"),
                 "side": order.get("order_type"),
-                "volume": order.get("volume"),
+                "volume": order_result.get("actual_volume") or order.get("volume"),
                 "open_price": position.get("price_open") if position else order_result.get("price"),
                 "open_time": position.get("time") if position else order_result.get("time"),
                 "open_time_msc": position.get("time_msc") if position else order_result.get("time_msc"),
             },
         }
+        if order_result.get("partial_fill"):
+            response["partial_fill"] = True
+            response["warning"] = order_result["warning"]
+            response["requested_volume"] = order_result.get("requested_volume")
+            response["actual_volume"] = order_result.get("actual_volume")
+        return response
 
     def close_position_details(self, ticket: int, volume: float = None, deviation: int = 20,
                                comment: str = '', type_filling: str = 'FOK') -> Dict[str, Any]:
         before_positions = self.get_positions(ticket=int(ticket))
+        if not before_positions:
+            return {
+                "success": True,
+                "idempotent": True,
+                "verified": True,
+                "request": {
+                    "ticket": ticket,
+                    "volume": volume,
+                    "deviation": deviation,
+                    "comment": comment,
+                    "type_filling": type_filling,
+                },
+                "result": {
+                    "ticket": str(ticket),
+                    "position": str(ticket),
+                    "idempotent": True,
+                },
+                "summary": {"ticket": str(ticket), "position_ticket": str(ticket)},
+                "positions_before": [],
+                "positions_after": self.get_positions(),
+            }
         closed_position = before_positions[0] if before_positions else {}
         result = self.close_position(ticket, volume=volume, deviation=deviation, comment=comment, type_filling=type_filling)
-        close_result = self._result_to_dict(result)
+        close_result = self._decorate_order_result(
+            result,
+            requested_volume=float(
+                volume if volume is not None else closed_position.get("volume") or 0
+            ),
+        )
         deals = self._history_deals_for_position(int(ticket))
         positions_after = self.get_positions(magic=closed_position.get("magic")) if closed_position else self.get_positions()
-        return {
+        response = {
             "success": True,
             "request": {"ticket": ticket, "volume": volume, "deviation": deviation, "comment": comment, "type_filling": type_filling},
             "result": close_result,
@@ -176,6 +278,11 @@ class TradeService:
             "positions_before": before_positions,
             "positions_after": positions_after,
         }
+        if close_result.get("partial_fill"):
+            response["partial_fill"] = True
+            response["warning"] = close_result["warning"]
+            response["actual_volume"] = close_result.get("actual_volume")
+        return response
 
     def send_market_order(self, symbol: str, volume: float, order_type: str, sl: float, tp: float = None,
                           deviation: int = 20, comment: str = '', magic: int = 0, type_filling: str = 'FOK'):
@@ -220,8 +327,8 @@ class TradeService:
             
         result = mt5.order_send(request)
         if result is None:
-            raise MT5OrderError("Order failed: empty response")
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            raise self._empty_order_error("Order failed")
+        if self._retcode(result) not in self._accepted_retcodes():
             raise MT5OrderError(f"Order failed: {result.comment}", code=result.retcode)
         return result
 
@@ -366,13 +473,18 @@ class TradeService:
 
         positions = mt5.positions_get(ticket=ticket)
         if not positions:
-            raise MT5OrderError(f"Position {ticket} not found")
+            raise MT5OrderError(f"Position {ticket} not found", code=10036)
 
         pos = positions[0]
         close_volume = float(volume) if volume is not None else pos.volume
         order_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
         market_data_service.ensure_symbol_selected(pos.symbol)
         tick = mt5.symbol_info_tick(pos.symbol)
+        if tick is None:
+            raise MT5SymbolNotFoundError(
+                f"Failed to get tick for {pos.symbol}",
+                code="MT5_SYMBOL_NOT_FOUND",
+            )
         price = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
 
         filling_map = {
@@ -396,7 +508,9 @@ class TradeService:
         }
 
         result = mt5.order_send(request)
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
+        if result is None:
+            raise self._empty_order_error("Close failed")
+        if self._retcode(result) not in self._accepted_retcodes():
             raise MT5OrderError(f"Close failed: {result.comment}", code=result.retcode)
         return result
 
@@ -440,9 +554,17 @@ class TradeService:
             ticket = pos.get("ticket")
             try:
                 closed.append(self.close_position_details(int(ticket), type_filling=type_filling))
-            except MT5OrderError as e:
+            except MT5BaseException as e:
                 logger.error(f"Failed to close position {ticket}: {e}")
-                errors.append({"ticket": ticket, "error": str(e)})
+                errors.append({
+                    "ticket": ticket,
+                    "retcode": str(e.code),
+                    "error_code": str(e.code),
+                    "exception_type": type(e).__name__,
+                    "error": str(e),
+                    "raw_message": str(e),
+                    "diagnostic_detail": str(getattr(e, "detail", "") or e),
+                })
         after_positions = self.get_positions(magic)
         return {
             "success": not errors,
@@ -452,6 +574,14 @@ class TradeService:
             "errors": errors,
             "positions_before": before_positions,
             "positions_after": after_positions,
+            "closed_count": len(closed),
+            "failed_count": len(errors),
+            "partial_fill": any(item.get("partial_fill") for item in closed),
+            "warnings": [
+                item.get("warning")
+                for item in closed
+                if item.get("warning")
+            ],
         }
 
     def get_orders(self, symbol: str = None, ticket: int = None) -> List[Dict]:
