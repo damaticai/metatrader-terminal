@@ -45,5 +45,6 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:${{ github.event_name == 'workflow_dispatch' && inputs.tag || 'latest' }}
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:socket-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/damaticai/metatrader-terminal

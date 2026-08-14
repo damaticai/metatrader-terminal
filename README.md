@@ -57,9 +57,22 @@ Supported operations:
 - `history.orders`
 - `network.public_ip` (fixed HTTPS provider allowlist; empty payload only)
 
-Protocol version `1.2` advertises its version and operation list in the
-`health` response. Consumers must fail closed if either the version or a
-required capability is missing.
+`trade.open` accepts an optional Agent-generated `execution_id`. A successful
+v1.3 response always includes `position_ticket`, `order_ticket`,
+`confirmed_at`, and the same `execution_id`; a missing position ticket is a
+failed confirmation rather than a usable open result.
+
+`trade.events.subscribe` is a dedicated, long-lived connection. It accepts an
+empty payload, returns the normal success frame, then emits frames shaped as
+`{"type":"trade.event","payload":...}`. The terminal scans MT5 history every
+20 ms without waiting ahead of a trade call, de-duplicates by deal ticket, and
+reports `position.opened` / `position.closed` events. It is loopback-only like
+every other Socket operation.
+
+Protocol version `1.3` advertises its version, operation list, and event-stream
+`detection_p95_ms` / `slo_ok` telemetry in the `health` response. Consumers
+must fail closed if a required capability is absent or the event stream's p95
+exceeds its 30 ms detection SLO.
 
 ## Running
 

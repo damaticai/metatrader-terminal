@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ipaddress
 import json
 import logging
@@ -11,6 +12,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections import deque
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -18,7 +20,8 @@ from typing import Any, Callable
 
 MAX_FRAME_BYTES = 1024 * 1024
 HEADER = struct.Struct(">I")
-SOCKET_PROTOCOL_VERSION = "1.2"
+SOCKET_PROTOCOL_VERSION = "1.3"
+TRADE_EVENT_INTERVAL_SECONDS = 0.020
 PUBLIC_IP_PROVIDERS = (
     ("https://api.ipify.org", "ipify"),
     ("https://checkip.amazonaws.com", "aws-checkip"),
@@ -118,6 +121,9 @@ class MT5SocketDispatcher:
 
     def __init__(self) -> None:
         self._ipc_lock = threading.Lock()
+        self._priority_condition = threading.Condition()
+        self._pending_trade_calls = 0
+        self._event_metrics_provider: Callable[[], dict[str, Any]] = lambda: {}
         self._operations: dict[str, Callable[[dict[str, Any]], Any]] = {
             "health": self.health,
             "terminal.login": self.login,
@@ -140,8 +146,47 @@ class MT5SocketDispatcher:
             raise ValueError(f"unsupported operation: {operation}")
         if operation == "network.public_ip":
             return json_value(handler(payload))
-        with self._ipc_lock:
-            return json_value(handler(payload))
+        is_trade = operation.startswith("trade.")
+        if is_trade:
+            with self._priority_condition:
+                self._pending_trade_calls += 1
+        try:
+            with self._ipc_lock:
+                return json_value(handler(payload))
+        finally:
+            if is_trade:
+                with self._priority_condition:
+                    self._pending_trade_calls -= 1
+                    self._priority_condition.notify_all()
+
+    def poll_trade_events(self, cursor: dict[str, Any]) -> dict[str, Any] | None:
+        """Read MT5 history only while no trade request is waiting for the IPC lock.
+
+        The MetaTrader5 Python package is not safe for concurrent calls.  Event
+        polling therefore shares the same lock as RPC, but uses a non-blocking
+        acquisition so an event scan never queues ahead of an order or close.
+        """
+        with self._priority_condition:
+            if self._pending_trade_calls:
+                return None
+        if not self._ipc_lock.acquire(blocking=False):
+            return None
+        try:
+            with self._priority_condition:
+                if self._pending_trade_calls:
+                    return None
+            now = datetime.now(timezone.utc)
+            return self.history_deals({
+                "from_time": (now - timedelta(seconds=5)).isoformat(),
+                "to_time": (now + timedelta(seconds=1)).isoformat(),
+                "cursor": cursor,
+                "limit": HISTORY_MAX_LIMIT,
+            })
+        finally:
+            self._ipc_lock.release()
+
+    def set_event_metrics_provider(self, provider: Callable[[], dict[str, Any]]) -> None:
+        self._event_metrics_provider = provider
 
     def health(self, _payload: dict[str, Any]) -> dict[str, Any]:
         status = json_value(connector().status())
@@ -150,7 +195,8 @@ class MT5SocketDispatcher:
         return {
             **status,
             "socket_protocol_version": SOCKET_PROTOCOL_VERSION,
-            "socket_capabilities": sorted(self._operations),
+            "socket_capabilities": sorted((*self._operations, "trade.events.subscribe")),
+            "trade_event_stream": self._event_metrics_provider(),
         }
 
     @staticmethod
@@ -203,7 +249,30 @@ class MT5SocketDispatcher:
             "magic": int(payload.get("magic") or 0),
             "type_filling": str(payload.get("type_filling") or "FOK"),
         }
-        return service().execute_market_order(order)
+        result = service().execute_market_order(order)
+        if not isinstance(result, dict):
+            raise RuntimeError("trade.open did not return an object")
+        summary = result.get("summary") or {}
+        order_result = result.get("order_result") or result.get("result") or {}
+        position = result.get("position") or {}
+        position_ticket = (
+            summary.get("position_ticket") or summary.get("ticket")
+            or position.get("ticket") or order_result.get("position")
+            or order_result.get("ticket")
+        )
+        order_ticket = (
+            summary.get("order_ticket") or order_result.get("order")
+            or order_result.get("order_ticket") or ""
+        )
+        if not position_ticket:
+            raise RuntimeError("trade.open confirmation is missing position_ticket")
+        return {
+            **result,
+            "position_ticket": str(position_ticket),
+            "order_ticket": str(order_ticket) if order_ticket else "",
+            "confirmed_at": datetime.now(timezone.utc).isoformat(),
+            "execution_id": str(payload.get("execution_id") or ""),
+        }
 
     @staticmethod
     def close_trade(payload: dict[str, Any]) -> dict[str, Any]:
@@ -403,10 +472,96 @@ class MT5SocketDispatcher:
         raise PublicIPLookupError("public IP lookup failed for all configured providers")
 
 
+class TradeEventPump:
+    """Converts MT5 history deals into a small, de-duplicated event stream."""
+
+    def __init__(self, dispatcher: MT5SocketDispatcher, publish: Callable[[dict[str, Any]], Any]) -> None:
+        self.dispatcher = dispatcher
+        self.publish = publish
+        self.cursor: dict[str, Any] = {"time_msc": 0, "deal_ticket": ""}
+        self.primed = False
+        self.task: asyncio.Task[None] | None = None
+        self._detection_latencies_ms: deque[float] = deque(maxlen=1024)
+        self._broker_observed_lag_ms: deque[float] = deque(maxlen=1024)
+
+    def metrics(self) -> dict[str, Any]:
+        values = sorted(self._detection_latencies_ms)
+        p95 = values[min(len(values) - 1, int(len(values) * 0.95))] if values else 0.0
+        return {
+            "interval_ms": int(TRADE_EVENT_INTERVAL_SECONDS * 1000),
+            "detection_count": len(values),
+            "detection_p95_ms": round(p95, 3),
+            "detection_slo_ms": 30,
+            "slo_ok": not values or p95 <= 30,
+            "broker_observed_lag_last_ms": round(self._broker_observed_lag_ms[-1], 3) if self._broker_observed_lag_ms else 0.0,
+        }
+
+    async def start(self) -> None:
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._run(), name="mt5-trade-event-pump")
+
+    async def stop(self) -> None:
+        if self.task is not None:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+            self.task = None
+
+    async def _run(self) -> None:
+        while True:
+            started = time.perf_counter()
+            try:
+                await self.poll_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("MT5 trade event scan failed")
+            await asyncio.sleep(max(0, TRADE_EVENT_INTERVAL_SECONDS - (time.perf_counter() - started)))
+
+    async def poll_once(self) -> None:
+        started = time.perf_counter()
+        result = await asyncio.to_thread(self.dispatcher.poll_trade_events, self.cursor)
+        if result is None:
+            return
+        self._detection_latencies_ms.append((time.perf_counter() - started) * 1000)
+        deals = list(result.get("deals") or [])
+        cursor = result.get("cursor")
+        if isinstance(cursor, dict):
+            self.cursor = cursor
+        if not self.primed:
+            self.primed = True
+            return
+        detected_at = datetime.now(timezone.utc).isoformat()
+        detected_at_ms = time.time() * 1000
+        for deal in deals:
+            entry = str(deal.get("entry") or "").lower()
+            event_type = "position.opened" if entry == "in" else "position.closed" if entry in {"out", "out_by", "inout"} else ""
+            if not event_type:
+                continue
+            time_msc = int(deal.get("time_msc") or 0)
+            if time_msc:
+                self._broker_observed_lag_ms.append(max(0.0, detected_at_ms - time_msc))
+            published = self.publish({
+                "event_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"mt5-deal:{deal.get('deal_ticket')}")),
+                "event_type": event_type,
+                "detected_at": detected_at,
+                "deal": deal,
+            })
+            if inspect.isawaitable(published):
+                await published
+
+
 class MT5SocketServer:
     def __init__(self, dispatcher: MT5SocketDispatcher | None = None) -> None:
         self.dispatcher = dispatcher or MT5SocketDispatcher()
         self.server: asyncio.AbstractServer | None = None
+        self._subscribers: dict[asyncio.StreamWriter, asyncio.Lock] = {}
+        self._pump = TradeEventPump(self.dispatcher, self._publish_trade_event)
+        register_metrics = getattr(self.dispatcher, "set_event_metrics_provider", None)
+        if callable(register_metrics):
+            register_metrics(self._pump.metrics)
 
     async def start(self, host: str | None = None, port: int | None = None) -> asyncio.AbstractServer:
         self.server = await asyncio.start_server(
@@ -444,6 +599,17 @@ class MT5SocketServer:
                     payload = request.get("payload") or {}
                     if not isinstance(payload, dict):
                         raise ValueError("payload must be an object")
+                    if operation == "trade.events.subscribe":
+                        if payload:
+                            raise ValueError("trade.events.subscribe payload must be empty")
+                        await self._subscribe(writer)
+                        await self._write(writer, {
+                            "id": request_id,
+                            "ok": True,
+                            "result": {"stream": "trade.events", "interval_ms": int(TRADE_EVENT_INTERVAL_SECONDS * 1000)},
+                        })
+                        await reader.read()
+                        return
                     result = await asyncio.to_thread(self.dispatcher.dispatch, operation, payload)
                     response = {"id": request_id, "ok": True, "result": result}
                 except Exception as exc:
@@ -455,8 +621,26 @@ class MT5SocketServer:
                     }
                 await self._write(writer, response)
         finally:
+            await self._unsubscribe(writer)
             writer.close()
             await writer.wait_closed()
+
+    async def _subscribe(self, writer: asyncio.StreamWriter) -> None:
+        self._subscribers[writer] = asyncio.Lock()
+        await self._pump.start()
+
+    async def _unsubscribe(self, writer: asyncio.StreamWriter) -> None:
+        self._subscribers.pop(writer, None)
+        if not self._subscribers:
+            await self._pump.stop()
+
+    async def _publish_trade_event(self, event: dict[str, Any]) -> None:
+        for writer, write_lock in list(self._subscribers.items()):
+            try:
+                async with write_lock:
+                    await self._write(writer, {"type": "trade.event", "payload": event})
+            except (ConnectionError, asyncio.IncompleteReadError, BrokenPipeError):
+                await self._unsubscribe(writer)
 
     @staticmethod
     async def _write(writer: asyncio.StreamWriter, payload: dict[str, Any]) -> None:

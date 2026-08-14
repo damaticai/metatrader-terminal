@@ -160,6 +160,56 @@ def test_health_advertises_socket_protocol_version(monkeypatch):
     assert result["connected"] is True
     assert result["socket_protocol_version"] == SOCKET_PROTOCOL_VERSION
     assert "network.public_ip" in result["socket_capabilities"]
+    assert "trade.events.subscribe" in result["socket_capabilities"]
+
+
+def test_trade_open_returns_normalized_execution_confirmation(monkeypatch):
+    class FakeTradeService:
+        @staticmethod
+        def execute_market_order(_order):
+            return {
+                "success": True,
+                "order_result": {"order": 7001, "position": 8001},
+                "position": {"ticket": 8001},
+                "summary": {"ticket": "8001"},
+            }
+
+    monkeypatch.setattr(socket_server, "service", lambda: FakeTradeService())
+
+    result = MT5SocketDispatcher.open_trade({
+        "symbol": "XAUUSD", "volume": 0.1, "side": "BUY", "execution_id": "exec-1",
+    })
+
+    assert result["position_ticket"] == "8001"
+    assert result["order_ticket"] == "7001"
+    assert result["execution_id"] == "exec-1"
+    assert result["confirmed_at"].endswith("+00:00")
+
+
+def test_trade_event_pump_ignores_initial_history_and_emits_new_deals():
+    class FakeDispatcher:
+        def __init__(self):
+            self.calls = 0
+
+        def poll_trade_events(self, _cursor):
+            self.calls += 1
+            deal = {
+                "deal_ticket": str(self.calls), "position_ticket": "100", "entry": "out",
+                "time_msc": self.calls, "symbol": "XAUUSD", "side": "buy",
+            }
+            return {"deals": [deal], "cursor": {"time_msc": self.calls, "deal_ticket": str(self.calls)}}
+
+    events = []
+
+    async def scenario():
+        pump = socket_server.TradeEventPump(FakeDispatcher(), events.append)
+        await pump.poll_once()
+        await pump.poll_once()
+
+    asyncio.run(scenario())
+    assert len(events) == 1
+    assert events[0]["event_type"] == "position.closed"
+    assert events[0]["deal"]["deal_ticket"] == "2"
 
 
 class FakeHTTPResponse:
