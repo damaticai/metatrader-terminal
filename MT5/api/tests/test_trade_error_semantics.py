@@ -128,6 +128,94 @@ def test_partial_fill_is_accepted_and_preserves_actual_volume(monkeypatch):
     assert response["summary"]["volume"] == 0.02
 
 
+def test_full_market_order_uses_order_ticket_without_waiting_for_position_snapshot(monkeypatch):
+    result = SimpleNamespace(
+        retcode=10009,
+        comment="Done",
+        order=70001,
+        deal=80001,
+        volume=0.01,
+        price=2400.1,
+        _asdict=lambda: {
+            "retcode": 10009,
+            "comment": "Done",
+            "order": 70001,
+            "deal": 80001,
+            "volume": 0.01,
+            "price": 2400.1,
+        },
+    )
+    _prepare_market_order(monkeypatch, result)
+    service = TradeService()
+    monkeypatch.setattr(service, "_positions_for_order", lambda *_args: [])
+
+    response = service.execute_market_order({
+        "symbol": "XAUUSD",
+        "volume": 0.01,
+        "order_type": "BUY",
+        "sl": 0,
+        "tp": None,
+        "deviation": 20,
+        "comment": "",
+        "magic": 1,
+        "type_filling": "FOK",
+    })
+
+    assert response["position_ticket"] == "70001"
+    assert response["order_ticket"] == "70001"
+    assert response["confirmation_source"] == "order_ticket"
+    assert response["summary"]["ticket"] == "70001"
+    assert response["order_result"]["position"] == "70001"
+
+
+def test_partial_market_order_falls_back_to_history_position_ticket(monkeypatch):
+    result = SimpleNamespace(
+        retcode=10010,
+        comment="Done partially",
+        order=70002,
+        volume=0.02,
+        price=2400.1,
+        _asdict=lambda: {
+            "retcode": 10010,
+            "comment": "Done partially",
+            "order": 70002,
+            "volume": 0.02,
+            "price": 2400.1,
+        },
+    )
+    fake = _prepare_market_order(monkeypatch, result)
+    fake.history_deals_get = lambda *, ticket: [SimpleNamespace(_asdict=lambda: {
+        "ticket": 80002,
+        "order": ticket,
+        "position_id": 90002,
+        "entry": 0,
+        "symbol": "XAUUSD",
+        "magic": 1,
+        "volume": 0.02,
+        "price": 2400.1,
+        "time": 1,
+        "time_msc": 1000,
+    })]
+    service = TradeService()
+    monkeypatch.setattr(service, "_positions_for_order", lambda *_args: [])
+
+    response = service.execute_market_order({
+        "symbol": "XAUUSD",
+        "volume": 0.03,
+        "order_type": "BUY",
+        "sl": 0,
+        "tp": None,
+        "deviation": 20,
+        "comment": "",
+        "magic": 1,
+        "type_filling": "FOK",
+    })
+
+    assert response["position_ticket"] == "90002"
+    assert response["order_ticket"] == "70002"
+    assert response["confirmation_source"] == "history_deal"
+
+
 def test_close_missing_position_is_idempotent_success(monkeypatch):
     service = TradeService()
     monkeypatch.setattr(service, "get_positions", lambda *args, **kwargs: [])

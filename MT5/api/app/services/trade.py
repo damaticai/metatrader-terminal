@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 import MetaTrader5 as mt5
@@ -8,6 +9,13 @@ from app.utils.exceptions import MT5BaseException, MT5OrderError, MT5SymbolNotFo
 from app.utils.time_sync import broker_datetime_from_utc, normalize_mt5_records
 
 logger = logging.getLogger(__name__)
+
+
+# A normal new market order on the Hedging accounts used by this service has
+# one opening order and one position. MT5 returns the opening order ticket in
+# the synchronous order_send result, while positions_get can lag behind it.
+# Other accepted result modes need history confirmation instead.
+HISTORY_CONFIRMATION_DELAYS = (0.0, 0.05, 0.10, 0.20, 0.40)
 
 class TradeService:
     @staticmethod
@@ -102,6 +110,65 @@ class TradeService:
         value = position.get("ticket") or position.get("identifier") or position.get("position") or position.get("order")
         return str(value) if value not in (None, "") else ""
 
+    @staticmethod
+    def _order_ticket(order_result: Dict[str, Any]) -> str:
+        value = order_result.get("order") or order_result.get("order_ticket")
+        try:
+            return str(int(value)) if int(value) > 0 else ""
+        except (TypeError, ValueError):
+            return ""
+
+    def _history_position_for_order(self, order_ticket: str) -> tuple[str, Dict[str, Any]]:
+        """Resolve a position ticket from the deals created by one order.
+
+        This is deliberately a fallback. In the normal Hedging-account market
+        order path, order_send's ``order`` is the position ticket and avoids a
+        cache-dependent confirmation. For partial or otherwise non-standard
+        fills, DEAL_POSITION_ID from history is the authoritative mapping.
+        """
+        if not order_ticket:
+            return "", {}
+        history_deals_get = getattr(mt5, "history_deals_get", None)
+        if not callable(history_deals_get):
+            return "", {}
+        for delay in HISTORY_CONFIRMATION_DELAYS:
+            if delay:
+                time.sleep(delay)
+            try:
+                raw_deals = history_deals_get(ticket=int(order_ticket))
+            except Exception as exc:
+                logger.debug("history lookup for opening order %s failed: %s", order_ticket, exc)
+                continue
+            if raw_deals is None:
+                continue
+            deals = normalize_mt5_records([
+                deal._asdict() if hasattr(deal, "_asdict") else dict(deal)
+                for deal in raw_deals
+            ])
+            positions: dict[str, Dict[str, Any]] = {}
+            for deal in deals:
+                deal_order_ticket = str(deal.get("order") or deal.get("order_ticket") or "")
+                position_ticket = str(
+                    deal.get("position_id") or deal.get("position_ticket") or deal.get("position") or ""
+                )
+                if deal_order_ticket != order_ticket or not position_ticket:
+                    continue
+                entry = self._deal_entry(deal).upper()
+                if entry and entry not in {"0", "IN", "ENTRY_IN", "DEAL_ENTRY_IN"}:
+                    continue
+                positions[position_ticket] = deal
+            if len(positions) == 1:
+                ticket, deal = next(iter(positions.items()))
+                return ticket, deal
+            if len(positions) > 1:
+                logger.warning(
+                    "opening order %s produced multiple position tickets: %s",
+                    order_ticket,
+                    sorted(positions),
+                )
+                return "", {}
+        return "", {}
+
     def _positions_for_order(self, symbol: str, magic: int = 0) -> List[Dict]:
         if magic not in (None, 0):
             return self.get_positions(magic=magic)
@@ -192,6 +259,7 @@ class TradeService:
             order_result.get("actual_volume")
             or order["volume"]
         )
+        order_ticket = self._order_ticket(order_result)
         positions_after = self._positions_for_order(order["symbol"], int(order.get("magic") or 0))
         position = self._best_open_position(
             positions_after,
@@ -201,22 +269,59 @@ class TradeService:
             int(order.get("magic") or 0),
             before_tickets,
         )
+        position_ticket = ""
+        confirmation_source = ""
+
+        # This service only uses this shortcut for a fully completed new
+        # market order. In the deployed Hedging-account workflow, MT5's
+        # opening order ticket is the position ticket. Crucially, this does
+        # not depend on the asynchronous positions_get cache.
+        if (
+            self._retcode(result) == int(getattr(mt5, "TRADE_RETCODE_DONE", 10009))
+            and order_ticket
+        ):
+            position_ticket = order_ticket
+            confirmation_source = "order_ticket"
+        elif position:
+            position_ticket = self._position_ticket(position)
+            confirmation_source = "position_snapshot"
+        elif order_ticket:
+            position_ticket, history_deal = self._history_position_for_order(order_ticket)
+            if position_ticket:
+                confirmation_source = "history_deal"
+                position = {
+                    "ticket": position_ticket,
+                    "identifier": position_ticket,
+                    "symbol": history_deal.get("symbol") or order.get("symbol"),
+                    "magic": history_deal.get("magic") or order.get("magic"),
+                    "volume": history_deal.get("volume") or matched_volume,
+                    "price_open": history_deal.get("price") or order_result.get("price"),
+                    "time": history_deal.get("time") or order_result.get("time"),
+                    "time_msc": history_deal.get("time_msc") or order_result.get("time_msc"),
+                }
         if position and position.get("ticket"):
-            order_result["position"] = position.get("ticket")
-            order_result["ticket"] = position.get("ticket")
+            position_ticket = position_ticket or self._position_ticket(position)
             order_result["price_open"] = position.get("price_open")
             order_result["time"] = position.get("time")
             order_result["time_msc"] = position.get("time_msc")
+        if position_ticket:
+            order_result["position"] = position_ticket
+            order_result["ticket"] = position_ticket
         response = {
             "success": True,
             "request": dict(order),
             "result": order_result,
             "order_result": order_result,
             "position": position,
+            "position_ticket": position_ticket,
+            "order_ticket": order_ticket,
+            "confirmation_source": confirmation_source,
             "positions_before": before_positions,
             "positions_after": positions_after,
             "summary": {
-                "ticket": str(position.get("ticket")) if position else "",
+                "ticket": position_ticket,
+                "position_ticket": position_ticket,
+                "order_ticket": order_ticket,
                 "symbol": order.get("symbol"),
                 "side": order.get("order_type"),
                 "volume": order_result.get("actual_volume") or order.get("volume"),
